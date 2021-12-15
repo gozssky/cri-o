@@ -28,6 +28,7 @@ import (
 	oci "github.com/cri-o/cri-o/internal/oci"
 	"github.com/cri-o/cri-o/internal/storage"
 	crioann "github.com/cri-o/cri-o/pkg/annotations"
+	"github.com/cri-o/cri-o/pkg/config"
 	ctrIface "github.com/cri-o/cri-o/pkg/container"
 	"github.com/cri-o/cri-o/server/cri/types"
 	securejoin "github.com/cyphar/filepath-securejoin"
@@ -526,7 +527,15 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 		if err != nil {
 			return nil, err
 		}
-		setupSystemd(specgen.Mounts(), *specgen)
+		rt, err := s.Runtime().RuntimeType(sb.RuntimeHandler())
+		if err != nil {
+			return nil, err
+		}
+		if rt == config.RuntimeTypeVM {
+			setupSystemdVM(*specgen)
+		} else {
+			setupSystemd(specgen.Mounts(), *specgen)
+		}
 	}
 
 	// When running on cgroupv2, automatically add a cgroup namespace for not privileged containers.
@@ -605,6 +614,12 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount container %s(%s): %v", containerName, containerID, err)
 	}
+	customRootfs := ""
+	for _, m := range ociMounts {
+		if m.Destination == "/" {
+			customRootfs = m.Source
+		}
+	}
 
 	defer func() {
 		if retErr != nil {
@@ -647,16 +662,19 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 	}
 
 	// Setup user and groups
-	if linux != nil {
+	if linux != nil && customRootfs == "" {
 		if err := setupContainerUser(ctx, specgen, mountPoint, mountLabel, containerInfo.RunDir, securityContext, containerImageConfig); err != nil {
 			return nil, err
 		}
 	}
 
 	// Add image volumes
-	volumeMounts, err := addImageVolumes(ctx, mountPoint, s, &containerInfo, mountLabel, specgen)
-	if err != nil {
-		return nil, err
+	var volumeMounts []rspec.Mount
+	if customRootfs == "" {
+		volumeMounts, err = addImageVolumes(ctx, mountPoint, s, &containerInfo, mountLabel, specgen)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Set working directory
@@ -701,7 +719,16 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 			Destination: m.Destination,
 			Source:      m.Source,
 		}
-		ctr.SpecAddMount(rspecMount)
+		if rspecMount.Destination == "/" {
+			sysMounts := ctr.Spec().Mounts()
+			ctr.Spec().ClearMounts()
+			ctr.SpecAddMount(rspecMount)
+			for _, sysMount := range sysMounts {
+				ctr.SpecAddMount(sysMount)
+			}
+		} else {
+			ctr.SpecAddMount(rspecMount)
+		}
 	}
 
 	if s.ContainerServer.Hooks != nil {
@@ -772,12 +799,14 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 	}
 	// add symlink /etc/mtab to /proc/mounts allow looking for mountfiles there in the container
 	// compatible with Docker
-	mtab := filepath.Join(mountPoint, "/etc/mtab")
-	if err := idtools.MkdirAllAs(filepath.Dir(mtab), 0755, rootPair.UID, rootPair.GID); err != nil {
-		return nil, errors.Wrap(err, "error creating mtab directory")
-	}
-	if err := os.Symlink("/proc/mounts", mtab); err != nil && !os.IsExist(err) {
-		return nil, err
+	if customRootfs == "" {
+		mtab := filepath.Join(mountPoint, "/etc/mtab")
+		if err := idtools.MkdirAllAs(filepath.Dir(mtab), 0755, rootPair.UID, rootPair.GID); err != nil {
+			return nil, errors.Wrap(err, "error creating mtab directory")
+		}
+		if err := os.Symlink("/proc/mounts", mtab); err != nil && !os.IsExist(err) {
+			return nil, err
+		}
 	}
 
 	if os.Getenv(rootlessEnvName) != "" {
@@ -1024,7 +1053,16 @@ func setupSystemd(mounts []rspec.Mount, g generate.Generator) {
 		}
 		g.AddMount(tmpfsMnt)
 	}
+	setupSystemdCgroup(g)
+	g.AddProcessEnv("container", "crio")
+}
 
+func setupSystemdVM(g generate.Generator) {
+	setupSystemdCgroup(g)
+	g.AddProcessEnv("container", "crio")
+}
+
+func setupSystemdCgroup(g generate.Generator) {
 	if node.CgroupIsV2() {
 		g.RemoveMount("/sys/fs/cgroup")
 
@@ -1045,5 +1083,4 @@ func setupSystemd(mounts []rspec.Mount, g generate.Generator) {
 		g.AddMount(systemdMnt)
 		g.AddLinuxMaskedPaths("/sys/fs/cgroup/systemd/release_agent")
 	}
-	g.AddProcessEnv("container", "crio")
 }
