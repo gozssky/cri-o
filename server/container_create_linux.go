@@ -154,9 +154,20 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 	}
 	securityContext := containerConfig.Linux.SecurityContext
 
+	runtimeHandler := sb.RuntimeHandler()
+	runtimeType, err := s.Runtime().RuntimeType(runtimeHandler)
+	if err != nil {
+		return nil, err
+	}
+
+	// A container is kernel separated if we're using shimv2, or we're using a kata v1 binary
+	podIsKernelSeparated := runtimeType == config.RuntimeTypeVM ||
+		strings.Contains(strings.ToLower(runtimeHandler), "kata") ||
+		(runtimeHandler == "" && strings.Contains(strings.ToLower(s.config.DefaultRuntime), "kata"))
+
 	// creates a spec Generator with the default spec.
 	specgen := ctr.Spec()
-	specgen.HostSpecific = true
+	specgen.HostSpecific = !podIsKernelSeparated
 	specgen.ClearProcessRlimits()
 
 	for _, u := range s.config.Ulimits() {
@@ -527,11 +538,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, ctr ctrIface.Contai
 		if err != nil {
 			return nil, err
 		}
-		rt, err := s.Runtime().RuntimeType(sb.RuntimeHandler())
-		if err != nil {
-			return nil, err
-		}
-		if rt == config.RuntimeTypeVM {
+		if runtimeType == config.RuntimeTypeVM {
 			setupSystemdVM(*specgen)
 		} else {
 			setupSystemd(specgen.Mounts(), *specgen)

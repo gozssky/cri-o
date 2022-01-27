@@ -322,7 +322,7 @@ func setupCapabilities(specgen *generate.Generator, caps *types.Capability, defa
 	// will be all capabilities without `CAP_CHOWN`.
 	// see https://github.com/kubernetes/kubernetes/issues/51980
 	if addAll {
-		for _, c := range getOCICapabilitiesList() {
+		for _, c := range getOCICapabilitiesList(specgen.HostSpecific) {
 			if err := specgen.AddProcessCapabilityBounding(c); err != nil {
 				return err
 			}
@@ -338,7 +338,7 @@ func setupCapabilities(specgen *generate.Generator, caps *types.Capability, defa
 		}
 	}
 	if dropAll {
-		for _, c := range getOCICapabilitiesList() {
+		for _, c := range getOCICapabilitiesList(specgen.HostSpecific) {
 			if err := specgen.DropProcessCapabilityBounding(c); err != nil {
 				return err
 			}
@@ -360,7 +360,7 @@ func setupCapabilities(specgen *generate.Generator, caps *types.Capability, defa
 		}
 		capPrefixed := toCAPPrefixed(cap)
 		// Validate capability
-		if !inStringSlice(getOCICapabilitiesList(), capPrefixed) {
+		if !inStringSlice(getOCICapabilitiesList(specgen.HostSpecific), capPrefixed) {
 			return fmt.Errorf("unknown capability %q to add", capPrefixed)
 		}
 		if err := specgen.AddProcessCapabilityBounding(capPrefixed); err != nil {

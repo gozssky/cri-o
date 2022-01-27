@@ -39,10 +39,10 @@ func inStringSlice(ss []string, str string) bool {
 }
 
 // getOCICapabilitiesList returns a list of all available capabilities.
-func getOCICapabilitiesList() []string {
+func getOCICapabilitiesList(hostSpecific bool) []string {
 	caps := make([]string, 0, len(capability.List()))
 	for _, cap := range capability.List() {
-		if cap > validate.LastCap() {
+		if hostSpecific && cap > validate.LastCap() {
 			continue
 		}
 		caps = append(caps, "CAP_"+strings.ToUpper(cap.String()))
