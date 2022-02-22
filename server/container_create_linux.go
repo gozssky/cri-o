@@ -37,6 +37,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 
 	"github.com/intel/goresctrl/pkg/blockio"
 )
@@ -1035,7 +1036,7 @@ func mountExists(specMounts []rspec.Mount, dest string) bool {
 // systemd expects to have /run, /run/lock and /tmp on tmpfs
 // It also expects to be able to write to /sys/fs/cgroup/systemd and /var/log/journal
 func setupSystemd(mounts []rspec.Mount, g generate.Generator) {
-	options := []string{"rw", "rprivate", "noexec", "nosuid", "nodev"}
+	options := []string{"rw", "rprivate", "nosuid", "nodev"}
 	for _, dest := range []string{"/run", "/run/lock"} {
 		if mountExists(mounts, dest) {
 			continue
@@ -1073,19 +1074,57 @@ func setupSystemdCgroup(g generate.Generator) {
 	if node.CgroupIsV2() {
 		g.RemoveMount("/sys/fs/cgroup")
 
-		systemdMnt := rspec.Mount{
-			Destination: "/sys/fs/cgroup",
-			Type:        "cgroup",
-			Source:      "cgroup",
-			Options:     []string{"private", "rw"},
+		hasCgroupNs := false
+		for _, ns := range g.Config.Linux.Namespaces {
+			if ns.Type == rspec.CgroupNamespace {
+				hasCgroupNs = true
+				break
+			}
+		}
+
+		var systemdMnt rspec.Mount
+		if hasCgroupNs {
+			systemdMnt = rspec.Mount{
+				Destination: "/sys/fs/cgroup",
+				Type:        "cgroup",
+				Source:      "cgroup",
+				Options:     []string{"private", "rw"},
+			}
+		} else {
+			systemdMnt = rspec.Mount{
+				Destination: "/sys/fs/cgroup",
+				Type:        "bind",
+				Source:      "/sys/fs/cgroup",
+				Options:     []string{"bind", "private", "rw"},
+			}
 		}
 		g.AddMount(systemdMnt)
 	} else {
+		mountOptions := []string{"bind", "rprivate"}
+
+		var statfs unix.Statfs_t
+		if err := unix.Statfs("/sys/fs/cgroup/systemd", &statfs); err != nil {
+			mountOptions = append(mountOptions, "nodev", "noexec", "nosuid")
+		} else {
+			if statfs.Flags&unix.MS_NODEV == unix.MS_NODEV {
+				mountOptions = append(mountOptions, "nodev")
+			}
+			if statfs.Flags&unix.MS_NOEXEC == unix.MS_NOEXEC {
+				mountOptions = append(mountOptions, "noexec")
+			}
+			if statfs.Flags&unix.MS_NOSUID == unix.MS_NOSUID {
+				mountOptions = append(mountOptions, "nosuid")
+			}
+			if statfs.Flags&unix.MS_RDONLY == unix.MS_RDONLY {
+				mountOptions = append(mountOptions, "ro")
+			}
+		}
+
 		systemdMnt := rspec.Mount{
 			Destination: "/sys/fs/cgroup/systemd",
 			Type:        "bind",
 			Source:      "/sys/fs/cgroup/systemd",
-			Options:     []string{"bind", "nodev", "noexec", "nosuid"},
+			Options:     mountOptions,
 		}
 		g.AddMount(systemdMnt)
 		g.AddLinuxMaskedPaths("/sys/fs/cgroup/systemd/release_agent")
